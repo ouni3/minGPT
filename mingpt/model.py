@@ -23,21 +23,10 @@ class NewGELU(nn.Module):
     """
     实现了目前存在于Google BERT仓库中的GELU激活函数（与OpenAI GPT相同）。
     参考文献: Gaussian Error Linear Units (GELU) 论文: https://arxiv.org/abs/1606.08415
+    GELU(x) = 0.5 * x * (1.0 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
     """
 
     def forward(self, x):
-        """
-        实现了GELU激活函数的前向传播
-
-        GELU函数定义如下：
-        GELU(x) = 0.5 * x * (1.0 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-
-        Args:
-        x: 输入张量
-
-        Returns:
-        输出张量，经过GELU激活函数处理后的结果
-        """
         return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
 
 class CausalSelfAttention(nn.Module):
@@ -49,13 +38,16 @@ class CausalSelfAttention(nn.Module):
 
     def __init__(self, config):
         super().__init__()
+        #将词嵌入向量分割成多个低维度的向量，并分别输入到不同的注意力头中，可以让每个头专注于学习不同方面的语义信息。
+        #例如，一个头可以关注词语之间的语法关系，另一个头可以关注词语的语义角色，从而提高模型的表达能力。
         assert config.n_embd % config.n_head == 0
-        # 所有头的 key、query、value 投影，但在一个批次中
+        # 该线性层可能将输入向量映射到三个不同的向量空间，分别用于生成查询、键、值矩阵。
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
-        # 输出投影
+        # 输出投影层,用于将注意力机制的输出进行线性变换，生成最终的输出向量。
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
-        # 正则化
+        # 创建了一个 Dropout 层，用于 Transformer 模型中的注意力层。
         self.attn_dropout = nn.Dropout(config.attn_pdrop)
+        # 创建了一个 Dropout 层，用于 Transformer 模型中的残差连接 (Residual Connection)。
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
         # 因果掩码，确保注意力只应用于输入序列的左侧
         self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
@@ -67,7 +59,7 @@ class CausalSelfAttention(nn.Module):
         B, T, C = x.size() # 批量大小、序列长度、嵌入维度 (n_embd)
 
         # 计算批次中所有头的 query、key、value，并将 head 向前移动到批量维度
-        q, k ,v  = self.c_attn(x).split(self.n_embd, dim=2)
+        q, k ,v  = self.c_attn(x).split(self.n_embd, dim=2)#将一个 tensor 按照第二个维度（dim=2）分割成多个小的 tensor，每个小 tensor 的大小为 self.n_embd。
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -92,6 +84,7 @@ class Block(nn.Module):
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = nn.LayerNorm(config.n_embd)
+        #MLP forward 是将输入数据通过多层感知机进行前向传播的过程，包括线性变换、激活函数等操作，最终得到 MLP 的输出。
         self.mlp = nn.ModuleDict(dict(
             c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd),
             c_proj  = nn.Linear(4 * config.n_embd, config.n_embd),
@@ -188,7 +181,7 @@ class GPT(nn.Module):
             torch.nn.init.zeros_(module.bias)  # 层归一化偏置初始化为零
             torch.nn.init.ones_(module.weight)  # 层归一化权重初始化为一
 
-       @classmethod
+    @classmethod
     def from_pretrained(cls, model_type):
         """
         通过复制 huggingface/transformers 检查点的权重来初始化预训练的 GPT 模型。
@@ -344,3 +337,4 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
+    
