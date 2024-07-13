@@ -169,17 +169,23 @@ class GPT(nn.Module):
         n_params = sum(p.numel() for p in self.transformer.parameters())
         print("参数数量: %.2fM" % (n_params/1e6,))
 
+
+    # torch.nn.init.normal_(module.weight, mean=0.0, std=0.02) 
+    #均值为 0： 确保权重的初始值在正负值之间均匀分布，避免偏向某一方向。
+    #较小的标准差： 确保权重的初始值不会太大，有助于模型的稳定训练。
     def _init_weights(self, module):
-        # 初始化权重
+        # 线性层
         if isinstance(module, nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)  # 线性层权重初始化
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02) 
             if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)  # 线性层偏置初始化为零
+                torch.nn.init.zeros_(module.bias) 
+        # 嵌入层
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)  # 嵌入层权重初始化
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02) 
+        #层归一化
         elif isinstance(module, nn.LayerNorm):
-            torch.nn.init.zeros_(module.bias)  # 层归一化偏置初始化为零
-            torch.nn.init.ones_(module.weight)  # 层归一化权重初始化为一
+            torch.nn.init.zeros_(module.bias)  
+            torch.nn.init.ones_(module.weight) 
 
     @classmethod
     def from_pretrained(cls, model_type):
@@ -204,15 +210,21 @@ class GPT(nn.Module):
         # 复制权重，同时确保所有参数在名称和形状上都对齐且匹配
         keys = [k for k in sd_hf if not k.endswith('attn.masked_bias')]  # 忽略这些
         transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
+        
         # 基本上 openai 检查点使用 "Conv1D" 模块，但我们只想使用一个普通的 nn.Linear。
         # 这意味着我们在导入这些权重时必须对其进行转置
+
+        # 确保要加载的权重数量与目标模型的参数数量一致。
         assert len(keys) == len(sd)
-        for k in keys:
+        for k in keys: #遍历要加载的每个参数名称 k
             if any(k.endswith(w) for w in transposed):
                 # 对需要转置的 Conv1D 权重进行特殊处理
+
+                #转置后的预训练权重形状与目标模型中对应参数的形状一致。
                 assert sd_hf[k].shape[::-1] == sd[k].shape
+                #创建一个上下文环境，禁用梯度计算，避免在权重复制过程中进行不必要的梯度跟踪
                 with torch.no_grad():
-                    sd[k].copy_(sd_hf[k].t())
+                    sd[k].copy_(sd_hf[k].t())#将转置后的预训练权重复制到目标模型的对应参数中。
             else:
                 # 将其他参数进行普通复制
                 assert sd_hf[k].shape == sd[k].shape
@@ -229,31 +241,43 @@ class GPT(nn.Module):
         """
 
         # 将所有参数分成将进行和不会进行正则化权重衰减的参数
+        #L'(w) = L(w) + (lambda/2) * ||w||^2
+        #权重衰减是一种简单而有效的正则化技术，可以有效地防止模型过拟合，提高模型的泛化能力。
+        
+        # 权重衰减
         decay = set()
+        # 无权重衰减
         no_decay = set()
+
+        # 白名单模块的权重将进行权重衰减
         whitelist_weight_modules = (torch.nn.Linear, )
+        # 黑名单模块的权重将不会进行权重衰减
         blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.Embedding)
+
+        #mn 是模块的名称，m 是模块本身。
         for mn, m in self.named_modules():
+            #pn 是参数的名称，p 是参数张量本身。
             for pn, p in m.named_parameters():
-                fpn = '%s.%s' % (mn, pn) if mn else pn  # 完整的参数名称
-                # 随机注意：因为 named_modules 和 named_parameters 是递归的
-                # 我们会多次看到相同的张量 p。但是这样做
-                # 允许我们知道任何张量 p 属于哪个父模块...
-                if pn.endswith('bias'):
-                    # 所有偏差都不会衰减
+                #构建参数的完整名称 fpn
+                #如果模块有名称 (mn 不为空)，则使用'%s.%s' % (mn, pn) 模块名.参数名 的格式，例如 layer1.0.weight；
+                #否则，直接使用参数名pn，例如 bias。
+                fpn = '%s.%s' % (mn, pn) if mn else pn  
+                if pn.endswith('bias'): # 所有偏差都不会衰减               
                     no_decay.add(fpn)
                 elif pn.endswith('weight') and isinstance(m, whitelist_weight_modules):
-                    # 白名单模块的权重将进行权重衰减
                     decay.add(fpn)
-                elif pn.endswith('weight') and isinstance(m, blacklist_weight_modules):
-                    # 黑名单模块的权重将不会进行权重衰减
+                elif pn.endswith('weight') and isinstance(m, blacklist_weight_modules):            
                     no_decay.add(fpn)
 
-        # 验证我们是否考虑了每个参数
+        # 将所有参数的名称映射到对应的参数张量
         param_dict = {pn: p for pn, p in self.named_parameters()}
         inter_params = decay & no_decay
         union_params = decay | no_decay
+
+        #确保 decay 集合和 no_decay 集合的交集为空。
         assert len(inter_params) == 0, "参数 %s 同时出现在衰减/不衰减集合中！" % (str(inter_params), )
+
+        #确保所有参数都被划分到了 decay 集合或 no_decay 集合中。
         assert len(param_dict.keys() - union_params) == 0, "参数 %s 未被划分到衰减/不衰减集合中！" \
                                                     % (str(param_dict.keys() - union_params), )
 
@@ -262,6 +286,8 @@ class GPT(nn.Module):
             {"params": [param_dict[pn] for pn in sorted(list(decay))], "weight_decay": train_config.weight_decay},
             {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
         ]
+
+        #torch.optim.AdamW 是一种优秀的优化算法，它结合了 Adam 和权重衰减的优点
         optimizer = torch.optim.AdamW(optim_groups, lr=train_config.learning_rate, betas=train_config.betas)
         return optimizer
 
@@ -279,6 +305,7 @@ class GPT(nn.Module):
         """
         device = idx.device  # 获取设备
         b, t = idx.size()  # 获取批量大小和序列长度
+        #确保输入序列的长度 t 不超过模型的最大上下文长度 self.block_size
         assert t <= self.block_size, f"无法处理长度为 {t} 的序列，块大小仅为 {self.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0)  # 创建位置索引
 
@@ -316,23 +343,30 @@ class GPT(nn.Module):
             生成的词元索引的张量，形状为 (batch_size, sequence_length + max_new_tokens)。
         """
         for _ in range(max_new_tokens):
-            # 如果序列上下文过长，我们必须在 block_size 处截断它
+            # 获取 idx 张量的第二个维度的大小，也就是当前序列的长度。
+            #如果序列上下文过长，我们必须在 block_size 处截断它
             idx_cond = idx if idx.size(1) <= self.block_size else idx[:, -self.block_size:]
+
             # 前向传播模型以获取序列中索引的 logits
             logits, _ = self(idx_cond)
+
             # 获取最后一步的 logits 并按所需的温度进行缩放
             logits = logits[:, -1, :] / temperature
+
             # 可选地将 logits 裁剪为仅包含概率最高的 k 个选项
             if top_k is not None:
                 v, _ = torch.topk(logits, top_k)
                 logits[logits < v[:, [-1]]] = -float('Inf')
+
             # 应用 softmax 将 logits 转换为（归一化的）概率
             probs = F.softmax(logits, dim=-1)
+
             # 从分布中采样或选择概率最高的元素
             if do_sample:
                 idx_next = torch.multinomial(probs, num_samples=1)
             else:
                 _, idx_next = torch.topk(probs, k=1, dim=-1)
+                
             # 将采样的索引追加到正在运行的序列中并继续
             idx = torch.cat((idx, idx_next), dim=1)
 
