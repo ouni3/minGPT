@@ -78,7 +78,23 @@ class Trainer:
         C.batch_size = 64  # 批次大小
         C.learning_rate = 3e-4  # 学习率
         C.betas = (0.9, 0.95)  # Adam 优化器的 beta 参数
+        """
+        权重衰减通常通过在损失函数中添加 L1 或 L2 正则化项来实现。
+        L2 正则化（最常见）： 将所有权重的平方和乘以一个衰减因子 (decay factor)，然后添加到原始损失函数中。
+        Loss = Original Loss + (decay factor / 2) * sum(weights^2)
+        L1 正则化： 将所有权重的绝对值之和乘以一个衰减因子，然后添加到原始损失函数中。
+        Loss = Original Loss + decay factor * sum(|weights|)     
+        """
         C.weight_decay = 0.1  # 权重衰减（仅应用于矩阵乘法权重）
+
+        """
+        梯度范数裁剪是一种在神经网络训练过程中用于解决梯度爆炸问题 (exploding gradients) 的技术。
+        它通过设定一个阈值，将超过该阈值的梯度范数裁剪到阈值范围内，从而防止梯度变得过大。
+        工作原理：
+        计算梯度范数： 在每次迭代的反向传播过程中，计算所有模型参数的梯度向量范数。常用的范数包括 L1 范数和 L2 范数。
+        比较梯度范数与阈值： 将计算得到的梯度范数与预设的阈值进行比较。
+        裁剪梯度： 如果梯度范数超过阈值，则按比例缩小梯度向量，使其范数等于阈值。       
+        """
         C.grad_norm_clip = 1.0  # 梯度范数裁剪阈值
         return C  # 返回配置对象
 
@@ -132,7 +148,7 @@ class Trainer:
             self.iter_num = 0  # 初始化迭代次数
             self.iter_time = time.time()  # 记录开始时间
             data_iter = iter(train_loader)  # 创建数据迭代器
-            while True:  # 开始训练循环
+            while True:  # 开始训练循环 
 
                 # 获取下一个批次数据 (x, y)，如果迭代器结束则重新初始化
                 try:
