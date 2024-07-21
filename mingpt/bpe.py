@@ -25,22 +25,27 @@ def bytes_to_unicode():
     所以这只是一个简单的字节 0..255 到 Unicode 字符的一对一映射，这些字符“看起来很漂亮”，要么是原始形式，
     要么是一个有趣的移位字符，比如 'Ā' 或 'Ġ' 等等。
     """
-    # 188个整数，这些整数以其原始形式呈现良好，不需要移位
+    # beautiful sequence,188个整数，这些整数以其原始形式呈现良好，不需要移位
     bs = list(range(ord("!"), ord("~")+1))+list(range(ord("¡"), ord("¬")+1))+list(range(ord("®"), ord("ÿ")+1))
-    cs = bs[:] # bs中的所有整数b都将在输出字典中简单地映射到chr(b)
+    
+    # bs中的所有整数b都将在输出字典中简单地映射到chr(b)
+    cs = bs[:] 
+    
     # 现在获取需要移位的其他68个整数的表示形式
     # 每个都将映射到chr(256 + n)，其中n将在循环中从0...67增长
     n = 0
     for b in range(2**8):
-        if b not in bs:
-            # 如果此字节“难看”，则将其映射到下一个可用的“好看”字符
+        if b not in bs:# 如果此字节“难看”，则将其映射到下一个可用的“好看”字符        
             bs.append(b)
             cs.append(2**8+n)
             n += 1
     cs = [chr(n) for n in cs]
-    d = dict(zip(bs, cs))
-    return d
 
+    #“不美观”的字符将被映射到扩展的 ASCII 码 (256 以上) 的字符。
+    d = dict(zip(bs, cs))
+    return d 
+
+#返回word中包含所有相邻字符对的集合 pairs
 def get_pairs(word):
     """
     返回一个由元组组成的集合，其中包含可迭代对象 word 中所有相邻元素组成的大字母组合。
@@ -55,40 +60,87 @@ def get_pairs(word):
 class Encoder:
 
     def __init__(self, encoder, bpe_merges):
-        # 字节编码器/解码器
-        self.byte_encoder = bytes_to_unicode()
-        self.byte_decoder = {v:k for k, v in self.byte_encoder.items()}
-        # BPE（字节对编码）标记编码器/解码器
-        self.encoder = encoder
-        self.decoder = {v:k for k,v in self.encoder.items()}
-        # BPE 合并列表，定义 BPE“树”，由要合并成标记 ab 的元组 (a,b) 组成
-        self.bpe_ranks = dict(zip(bpe_merges, range(len(bpe_merges))))
-        # 用于预分词的分割模式
-        # 应该添加 re.IGNORECASE，以便 BPE 合并可以发生在缩写的首字母大写版本中 <-- 原始 openai 注释
+        """
+
+        **背景**
+
+        * **预分词 (Pre-tokenization):** 在使用像 BPE 这样的子词单元分词算法之前，通常会先对文本进行预分词。预分词会将文本分割成更小的单元，例如单词、标点符号等。
+        * **BPE 合并:** BPE 算法会迭代地将出现频率最高的字符对合并成一个新的子词单元。这个过程会持续进行，直到达到预设的词汇表大小或满足其他停止条件。
+        * **问题:** 如果预分词阶段没有考虑到大小写敏感的情况，那么 BPE 算法可能会将同一个词的不同大小写形式视为不同的单元。例如，"The" 和 "the" 可能会被视为两个不同的词，即使它们在语义上是相同的。
+
+        **注释解释**
+
+        * **`re.IGNORECASE`:**  这是一个正则表达式标志，表示在进行正则表达式匹配时忽略大小写。
+        * **作用:**  这段注释建议在预分词阶段使用 `re.IGNORECASE` 标志，以便将文本转换为小写形式。这样做可以确保 BPE 算法将同一个词的不同大小写形式视为相同的单元，从而提高分词的一致性和效率。
+
+        **示例**
+
+        假设我们有一个包含缩写词 "Mr." 的句子："Mr. Smith went to the store."
+
+        * **不使用 `re.IGNORECASE`:** 预分词可能会将句子分割为 ["Mr.", "Smith", "went", "to", "the", "store", "."]。由于 "Mr." 中包含大写字母，BPE 算法可能会将其视为一个独立的单元，而不会将其与其他单词中的 "mr" 合并。
+        * **使用 `re.IGNORECASE`:** 预分词会将句子转换为小写形式，并将其分割为 ["mr.", "smith", "went", "to", "the", "store", "."]。这样，BPE 算法就可以将 "mr." 与其他单词中的 "mr" 合并，从而生成更一致和有效的子词单元。
+
+        **总结**
+
+        在预分词阶段使用 `re.IGNORECASE` 标志可以有效地解决 BPE 分词在处理缩写词时的大小写敏感问题，提高分词质量。     
+
+        """
+
+
+
         """
         这段正则表达式到底要查找什么？
-
         Python 正则表达式参考: https://docs.python.org/3/library/re.html
-
         竖线 | 表示“或”，因此 re.findall 会从左到右匹配文本，并将匹配的部分分割成块。
         \'s 会将类似 Andrej's 的内容拆分为 (Andrej, 's)。
         ?\p{L}+：可选的空格，后跟 1 个或多个 Unicode 字符，这些字符属于“字母”类别。
         ?\p{N}+：可选的空格，后跟 1 个或多个 Unicode 字符，这些字符属于“数字”类别。
         ?[^\s\p{L}\p{N}]+：可选的空格，然后是 1 个或多个既不是空格、字母也不是数字的字符。
-        \s+(?!\S)：1 个或多个空白字符（例如空格、制表符等），除非它们后面跟着非空白字符。 因此，这将匹配连续的空白字符序列，但排除该序列中的最后一个空白字符。 最后一个空白字符有机会匹配前面模式中的可选空格  ?。
+        \s+(?!\S)：1 个或多个空白字符（例如空格、制表符等），除非它们后面跟着非空白字符。
+        因此，这将匹配连续的空白字符序列，但排除该序列中的最后一个空白字符。 最后一个空白字符有机会匹配前面模式中的可选空格  ?。
         \s+：1 个或多个空白字符，可能用于捕获字符串末尾的完整尾随空白序列。
-        简而言之：
-
+        简而言之：   
         我们对一些常见的撇号结构（'s、't、're 等）进行特殊处理，并将它们分成单独的标记。
         然后，我们将字符串分成连续的块：1) 字母、2) 数字、3) 非字母数字、4) 空白。
+        总的来说，这个正则表达式的作用是将英文文本分割成单词、数字、标点符号等单元，并识别出一些常见的英文缩写。
         """
+        # 字节编码器/解码器   d[32] -> 'Ġ'
+        self.byte_encoder = bytes_to_unicode()
+        self.byte_decoder = {v:k for k, v in self.byte_encoder.items()}
+        
+        # BPE（字节对编码）标记编码器/解码器  ('Ġ', 't')->[32]
+        self.encoder = encoder
+        self.decoder = {v:k for k,v in self.encoder.items()}
+       
+        # BPE 合并列表，定义 BPE“树”，由要合并成标记 ab 的元组 (a,b) 组成
+        #>>> bpe_merges = [('a', 'b'), ('c', 'd'), ('e', 'f')]
+        # >>> self.bpe_ranks = dict(zip(bpe_merges, range(len(bpe_merges))))
+        # >>> self.bpe_ranks
+        # {('a', 'b'): 0, ('c', 'd'): 1, ('e', 'f'): 2}
+        self.bpe_ranks = dict(zip(bpe_merges, range(len(bpe_merges))))
+        
+        # 用于预分词的分割模式
+        # 应该添加 re.IGNORECASE，以便 BPE 合并可以发生在缩写的首字母大写版本中 <-- 原始 openai 注释
+
         self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
         self.cache = {}
+
+
+
 
     def bpe(self, token):
         """
         此函数使用 self.bpe_ranks 将所有可能的 BPE（字节对编码）标记迭代地合并到树中。
         token 是一个字符串，表示单个“单词”（经过正则表达式分词后）以及字节编码后的结果，例如 “Ġthere”。
+        #假设我们要处理另一个单词 token = "Ġgather"。
+        # 处理流程：
+        # 转换为字符元组：word = ('Ġ', 'g', 'a', 't', 'h', 'e', 'r')。
+        # 获取所有相邻字符对：pairs = (('Ġ', 'g'), ('g', 'a'), ('a', 't'), ('t', 'h'), ('h', 'e'), ('e', 'r'))。
+        # 进入迭代合并循环：
+        # 查找 pairs 中排名最高的词对：('e', 'r')，合并得到 ('Ġ', 'g', 'a', 't', 'h', 'er')。
+        # 再次查找排名最高的词对：('t', 'h')，合并得到 ('Ġ', 'g', 'a', 'th', 'er')。
+        # 继续查找排名最高的词对：没有其他词对出现在 self.bpe_ranks 中，循环结束。
+        # 最终结果为 "Ġga th er"。
         """
         # token 是单个“单词”的字符串，经过字节编码后，例如“Ġthere”。
 
@@ -103,14 +155,16 @@ class Encoder:
             return token  # 如果没有字符对，直接返回原始标记
 
         while True:
-            # 找到可以合并的下一个最低等级的字符对
-            bigram = min(pairs, key=lambda pair: self.bpe_ranks.get(pair, float('inf')))  # 使用 lambda 表达式找到排名最低的字符对
+            # 找到可以合并的下一个靠前等级的字符对
+            # 使用 lambda 表达式找到排名最靠前的字符对34
+            bigram = min(pairs, key= lambda pair: self.bpe_ranks.get(pair, float('inf')))  
             if bigram not in self.bpe_ranks:
                 break  # 如果没有更多字符对可以合并，则退出循环
 
             first, second = bigram  # 获取字符对的两个字符
 
-            # 我们现在将在当前单词列表中将所有出现的 (first, second) 替换为一个合并标记 first_second，并在输出列表 new_word 中
+            # 我们现在将在当前单词列表中将所有出现的 (first, second) 
+            #替换为一个合并标记 first_second，并在输出列表 new_word 中
             new_word = []
             i = 0
             while i < len(word):
@@ -147,16 +201,51 @@ class Encoder:
         self.cache[token] = word  # 将结果缓存到 self.cache 中
         return word  # 返回合并后的单词
 
+
+
     def encode(self, text):
         """ 
         输入字符串，输出整数列表（BPE 索引）
+
+        # 预处理和分词:
+        # 使用 self.pat 对输入文本进行分词，得到 tokens = ['This', 'is', 'a', 'test', '.']。
+        # 字节编码和转换:
+
+        # 遍历 tokens 列表，对每个 token 进行处理：
+        # 例如，对于 token = 'This'：
+        # 转换为字节序列： token_bytes = b'This'
+        # 使用 self.byte_encoder 转换为 Unicode 字符串：token_translated = 'This'
+        # 其他 token 也进行类似的转换。
+        # BPE 合并:
+
+        # 对每个 token_translated 应用 BPE 合并规则：
+        # 例如，对于 token_translated = 'This'：
+        # 由于 ('Th', 'is') 的优先级高于其他词对，因此将它们合并，得到 'This'。
+        # 对于 token_translated = 'is'：
+        # 由于 ('i', 's') 出现在 self.bpe_ranks 中，合并得到 'is'。
+        # 其他 token_translated 也进行类似的处理。
+        # 索引转换:
+
+        # 将合并后的子词单元转换为词汇表索引：
+        # ['This', 'is', 'a', 'test', '.'] -> [2, 3, 4, 5, 6]
+        # 输出：
+
+        # 最终输出 BPE 索引列表：[2, 3, 4, 5, 6]。
         """
         bpe_idx = []  # 初始化一个空的 BPE 索引列表
+
         # 将输入文本预先分词为字符串标记（粗略地说就是单词）
         tokens = re.findall(self.pat, text)  # 使用正则表达式 self.pat 对文本进行分词
+       
         # 将每个标记处理成 BPE 整数
         for token in tokens:  # 遍历每个标记
             # 将标记编码为字节 (b'') 对象
+
+            """
+            text = "你好，世界！"  # 包含中文的字符串
+            encoded_bytes = text.encode('utf-8') 
+            print(encoded_bytes)  # 输出：b'\xe4\xbd\xa0\xe5\xa5\xbd\xef\xbc\x8c\xe4\xb8\x96\xe7\x95\x8c\xef\xbc\x81'
+            """
             token_bytes = token.encode('utf-8')  # 使用 UTF-8 编码将字符串转换为字节
             # 将所有字节转换为其 Unicode 字符串表示形式并展平
             token_translated = ''.join(self.byte_encoder[b] for b in token_bytes)  # 使用字节编码器将字节转换为 Unicode 字符
@@ -166,11 +255,14 @@ class Encoder:
             token_ix = [self.encoder[bpe_token] for bpe_token in token_merged]  # 使用编码器将 BPE 标记转换为整数索引
             # 扩展我们正在运行的所有输出整数列表
             bpe_idx.extend(token_ix)  # 将转换后的整数索引添加到 BPE 索引列表中
+       
         return bpe_idx  # 返回 BPE 索引列表
+
 
     def encode_and_show_work(self, text):
         """ 
         调试函数，与 encode 相同，但返回所有中间结果 
+        用于将文本编码为 BPE (Byte Pair Encoding) 索引序列，并返回所有中间结果，方便调试。
         """
         bpe_idx = []  # 最终的 BPE 索引列表
         parts = []  # 每个标记的中间结果列表
@@ -198,10 +290,12 @@ class Encoder:
     def decode(self, bpe_idx):
         """ 输入整数列表，输出字符串 """
         # 对整数进行逆映射以获取标记
-        tokens_merged = [self.decoder[token] for token in bpe_idx]
-        # 反转字节编码器，例如将 'Ġ' 恢复为 ' '，并获取字节
+        tokens_merged = [self.decoder[token] for token in bpe_idx]  
         tokens_flat = ''.join(tokens_merged)
+
+        # 反转字节编码器，例如将 'Ġ' 恢复为 ' '，并获取字节
         tokens_bytes = bytearray([self.byte_decoder[c] for c in tokens_flat])
+
         # 恢复完整的 utf-8 字符串
         text = tokens_bytes.decode('utf-8', errors='replace')
         return text
@@ -215,8 +309,9 @@ def get_file(local_file, remote_file):
 
 def get_encoder():
     """
-    返回 GPT BPE 编码器/解码器的实例，
-    并处理“数据库”文件的缓存。
+    作用是加载预训练的 GPT BPE 编码器/解码器，并将其封装在一个 Encoder 对象中返回。
+    该函数首先检查本地缓存中是否存在必要的文件，如果不存在则从远程服务器下载。
+    然后，函数加载并解析这些文件，最终创建并返回一个 Encoder 对象。
     """
     home_dir = os.path.expanduser('~')  # 获取用户主目录
     cache_dir = os.path.join(home_dir, '.cache', 'mingpt')  # 缓存目录
@@ -249,7 +344,9 @@ def get_encoder():
 
 class BPETokenizer:
     """ 
-    PyTorch感知类，包装了上面的Encoder类 
+    BPETokenizer 类提供了一个方便的接口，用于在 PyTorch 环境中使用预训练的 BPE 编码器/解码器。
+    它可以将文本编码为 PyTorch 张量，并将编码后的张量解码回文本。
+    这对于将文本数据预处理后输入到 PyTorch 模型中非常有用。
     """
 
     def __init__(self):
