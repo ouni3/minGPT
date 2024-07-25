@@ -50,6 +50,8 @@ class CausalSelfAttention(nn.Module):
         assert config.n_embd % config.n_head == 0
         
         # 该线性层将输入向量映射到三个不同的向量空间，分别用于生成查询、键、值矩阵。
+        #         nn.Linear 执行以下线性变换：
+        # output = input @ weight.T + bias
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd)
         
         # 输出投影层,用于将注意力机制的输出进行线性变换，生成最终的输出向量。
@@ -59,6 +61,16 @@ class CausalSelfAttention(nn.Module):
         self.attn_dropout = nn.Dropout(config.attn_pdrop)
        
         # 创建了一个 Dropout 层，用于 Transformer 模型中的残差连接 (Residual Connection)。
+        # 工作原理：
+        # 在训练过程中，nn.Dropout 会随机将输入张量中的一些元素设置为 0，而其他元素保持不变。被设置为 0 的元素相当于被“丢弃”了，
+        # 不参与本次前向传播和反向传播。
+        # 丢弃哪些元素的概率由参数 p 控制。例如，如果 p=0.5，则每个元素有 50% 的概率被丢弃。
+        # 在测试或推理模式下，nn.Dropout 不执行任何操作，直接返回输入张量。
+        # 作用：
+        # 防止过拟合： Dropout 可以看作是一种模型集成的方法。在每次训练迭代中，都会随机丢弃一些神经元，相当于训练了一个不同的模型。
+        # 最终的预测结果是多个模型的平均值，从而降低了模型对训练数据的依赖，提高了泛化能力。
+        # 正则化： Dropout 可以看作是一种对模型参数的正则化方法。通过随机丢弃神经元，可以防止模型对某些特征过度依赖，鼓励模型学习更鲁棒的特征表示。
+
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
         
 
@@ -79,6 +91,7 @@ class CausalSelfAttention(nn.Module):
 
         # 计算批次中所有头的 query、key、value，并将 head 向前移动到批量维度
         # 将一个 tensor 按照第二个维度（dim=2）分割成多个小的 tensor
+        #(B, T, C)----c_attn->(B, T, 3*C)----split--->3*(B, T, C)
         q, k ,v  = self.c_attn(x).split(self.n_embd, dim=2)
 
         #将输入特征的总维度 C 平均分成 self.n_head 份，得到每个注意力头处理的特征维度。
@@ -184,7 +197,8 @@ class Block(nn.Module):
 
     # 残差连接的作用:
     # 缓解梯度消失: 残差连接可以使梯度更容易地从网络的深层传递到浅层，从而缓解梯度消失问题，加速模型训练。
-    # 允许网络学习恒等映射: 残差连接使得网络可以更容易地学习到恒等映射 (identity mapping)，即输出等于输入。这对于训练非常深的网络非常重要，因为即使网络的某些层没有学习到有用的特征，也不会影响整个网络的性能。
+    # 允许网络学习恒等映射: 残差连接使得网络可以更容易地学习到恒等映射 (identity mapping)，即输出等于输入。
+    # 这对于训练非常深的网络非常重要，因为即使网络的某些层没有学习到有用的特征，也不会影响整个网络的性能。
     
     # 层归一化的作用:
     # 稳定训练过程: 层归一化可以使网络的每一层都保持稳定的数据分布，避免梯度爆炸或梯度消失问题，从而加速模型训练。
@@ -317,7 +331,6 @@ class GPT(nn.Module):
         for k in keys: #遍历要加载的每个参数名称 k
             if any(k.endswith(w) for w in transposed):
                 # 对需要转置的 Conv1D 权重进行特殊处理
-
                 # 转置后的预训练权重形状与目标模型中对应参数的形状一致。
                 assert sd_hf[k].shape[::-1] == sd[k].shape
                 # 创建一个上下文环境，禁用梯度计算，避免在权重复制过程中进行不必要的梯度跟踪
@@ -405,10 +418,13 @@ class GPT(nn.Module):
         b, t = idx.size()  # 获取批量大小和序列长度
         #确保输入序列的长度 t 不超过模型的最大上下文长度 self.block_size
         assert t <= self.block_size, f"无法处理长度为 {t} 的序列，块大小仅为 {self.block_size}"
+
+        #unsqueeze(dim): 在指定维度 dim 上增加一个维度。
         pos = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0)  # 创建位置索引
 
         # 前向传播 GPT 模型
-        tok_emb = self.transformer.wte(idx)  # 词元嵌入，形状为 (b, t, n_embd)
+        # 词元嵌入，形状为 (b, t, n_embd)
+        tok_emb = self.transformer.wte(idx)  
 
         # 自注意力机制无法感知词序
         # 位置嵌入，形状为 (1, t, n_embd)
@@ -418,9 +434,21 @@ class GPT(nn.Module):
         for block in self.transformer.h:
             x = block(x)  # 通过每个 Transformer 块
         x = self.transformer.ln_f(x)  # 应用最终的层归一化
+
         logits = self.lm_head(x)  # 预测下一个词元的 logits
 
         # 如果给定了目标，则计算损失
+        """
+        logits.view(-1, logits.size(-1)): 将模型输出的 logits 张量 (logits) 进行形状变换。
+        logits 的形状通常是 (batch_size, sequence_length, vocab_size)，其中 vocab_size 是词汇表大小。
+        view(-1, logits.size(-1)) 将其转换为 (batch_size * sequence_length, vocab_size) 的形状，这是 F.cross_entropy 函数所期望的输入形状。
+        targets.view(-1): 将目标值张量 (targets) 进行形状变换。
+        targets 的形状通常是 (batch_size, sequence_length)。
+        view(-1) 将其转换为 (batch_size * sequence_length,) 的形状，与变换后的 logits 相匹配。
+        ignore_index=-1: 指定忽略目标值中的填充标记。
+        在自然语言处理中，通常使用填充标记将不同长度的序列填充到相同的长度。
+        ignore_index=-1 表示忽略目标值中值为 -1 的元素，这些元素通常对应于填充标记。
+        """
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
@@ -439,7 +467,7 @@ class GPT(nn.Module):
             max_new_tokens：要生成的词元数量。
             temperature：控制生成文本随机性的温度参数。
             do_sample：是否从预测分布中采样词元，否则选择概率最高的词元。
-            top_k：可选参数，用于限制采样到概率最高的 k 个词元。
+            top_k：可选参数，用于限制采样到概率最高的 k 个词元。 
 
         返回值：
             生成的词元索引的张量，形状为 (batch_size, sequence_length + max_new_tokens)。
@@ -456,19 +484,22 @@ class GPT(nn.Module):
             logits, _ = self(idx_cond)
 
             # 获取最后一步的 logits 并按所需的温度进行缩放
+
             logits = logits[:, -1, :] / temperature
 
             # 可选地将 logits 裁剪为仅包含概率最高的 k 个选项
             if top_k is not None:
                 v, _ = torch.topk(logits, top_k)
-                logits[logits < v[:, [-1]]] = -float('Inf')#将概率排名低于 Top-k 的词元的概率 "屏蔽" 为 0
+                logits[logits < v[:, [-1]]] = -float('Inf')  #将概率排名低于 Top-k 的词元的概率 "屏蔽" 为 0
 
             # 应用 softmax 将 logits 转换为（归一化的）概率
+            # probs为词汇表每个单词的概率
             probs = F.softmax(logits, dim=-1)
 
             # 从分布中采样或选择概率最高的元素
+            #采样过程中，概率越高的词元被选中的可能性越大。
             if do_sample:
-                idx_next = torch.multinomial(probs, num_samples=1)#采样过程中，概率越高的词元被选中的可能性越大。
+                idx_next = torch.multinomial(probs, num_samples=1)
             else:
                 _, idx_next = torch.topk(probs, k=1, dim=-1)
                 
